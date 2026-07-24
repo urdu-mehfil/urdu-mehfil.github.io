@@ -38,12 +38,12 @@ from pathlib import Path
 
 import requests
 
-from extract_common import get, safe_dirname, local_filename, extract_page, page_url_for, \
+from extract_common import get_many, safe_dirname, local_filename, extract_page, page_url_for, \
     sanitize_category_dir_name
 from build_indexes import rebuild_category_index, rebuild_categories_index
 
 
-def crawl_thread(thread, out_root: Path, cat_dir_name: str):
+def crawl_thread(thread, out_root: Path, cat_dir_name: str, max_workers: int = 1):
     dir_name = safe_dirname(thread["thread_title"], thread["thread_id"])
     thread_dir = out_root / "categories" / cat_dir_name / dir_name
     total_pages = int(thread["total_pages"]) if thread.get("total_pages") else 1
@@ -54,12 +54,13 @@ def crawl_thread(thread, out_root: Path, cat_dir_name: str):
 
     thread_dir.mkdir(parents=True, exist_ok=True)
 
-    for page in range(1, total_pages + 1):
-        page_url = page_url_for(thread["url"], page)
-        try:
-            html = get(page_url)
-        except requests.HTTPError:
-            continue  # skip a missing page rather than aborting the whole thread
+    page_urls = [page_url_for(thread["url"], p) for p in range(1, total_pages + 1)]
+    html_by_url = get_many(page_urls, max_workers=max_workers)
+
+    for page, page_url in enumerate(page_urls, start=1):
+        html = html_by_url.get(page_url)
+        if html is None:
+            continue  # fetch failed after retries — skip this page rather than aborting the thread
         page_html, title, post_count = extract_page(html, page_url, page, total_pages)
         if page_html is not None:
             (thread_dir / local_filename(page)).write_text(page_html, encoding="utf-8")
@@ -72,6 +73,12 @@ def main():
     ap.add_argument("--category", help="Category name exactly as it appears in categories.csv")
     ap.add_argument("--category-id", help="Category id as it appears in categories.csv")
     ap.add_argument("--out", default="archive")
+    ap.add_argument("--max-workers", type=int, default=1,
+                     help="Concurrent requests when fetching a thread's pages "
+                          "(default 1 = same sequential, one-at-a-time behavior as before). "
+                          "This forum has rate-limited/blocked before at high sequential volume — "
+                          "raise it deliberately (try 3 first), watch for '! server returned "
+                          "429/503' messages, and only go higher if a full category runs clean.")
     args = ap.parse_args()
 
     if not args.category and not args.category_id:
@@ -92,10 +99,18 @@ def main():
     cat_dir_name = sanitize_category_dir_name(category_name)
     out_root = Path(args.out)
 
-    print(f"Archiving {len(selected)} threads in category '{category_name}'...")
-    done, skipped = 0, 0
+    print(f"Archiving {len(selected)} threads in category '{category_name}' "
+          f"(max {args.max_workers} concurrent requests per thread)...")
+    done, skipped, failed = 0, 0, 0
+
     for i, thread in enumerate(selected, 1):
-        result = crawl_thread(thread, out_root, cat_dir_name)
+        try:
+            result = crawl_thread(thread, out_root, cat_dir_name, max_workers=args.max_workers)
+        except Exception as e:
+            failed += 1
+            print(f"[{i}/{len(selected)}] {thread['thread_title']} — FAILED: {e}")
+            continue
+
         if result == "skipped":
             skipped += 1
             print(f"[{i}/{len(selected)}] {thread['thread_title']} — already done, skipped")
@@ -103,6 +118,11 @@ def main():
             done += 1
             print(f"[{i}/{len(selected)}] {thread['thread_title']} "
                   f"({thread.get('total_pages') or 1} page(s))")
+
+    if failed:
+        print(f"NOTE: {failed} thread(s) failed outright — if that's more than a couple, "
+              f"the server may be pushing back on the concurrency level. Consider lowering "
+              f"--max-workers and re-running (already-done threads are skipped).")
 
     print(f"Done. {done} threads archived, {skipped} already done. "
           f"Output under {out_root}/categories/{cat_dir_name}/")

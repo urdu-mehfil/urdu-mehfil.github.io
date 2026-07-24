@@ -8,16 +8,39 @@ building, and the filename-sanitizing helpers. Not run directly.
 import re
 import time
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; personal-archive/1.0; contact: YOUR-EMAIL-HERE)"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; personal-archive/1.0; contact: YOUR-EMAIL-HERE)"}
 session = requests.Session()
 session.headers.update(HEADERS)
+
+# Shared across all worker threads: if the server ever returns 429/503
+# to ANY request, every worker (not just the one that got throttled)
+# pauses until this timestamp before making further requests. This is
+# what keeps concurrency from turning "polite but slow" into "fast but
+# gets us blocked" — one bad response slows everyone down immediately.
+_backoff_lock = threading.Lock()
+_backoff_until = 0.0
+
+
+def _wait_for_backoff():
+    while True:
+        with _backoff_lock:
+            remaining = _backoff_until - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 5))
+
+
+def _trigger_backoff(seconds):
+    global _backoff_until
+    with _backoff_lock:
+        _backoff_until = max(_backoff_until, time.time() + seconds)
 
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="ur" dir="rtl">
@@ -44,17 +67,31 @@ POST_TEMPLATE = """<div class="post">
 </div>
 """
 
-WHITESPACE_BR_RE = re.compile(r"(?:<br\s*/?>\s*){2,}", re.IGNORECASE)
-EMPTY_BLOCK_RE = re.compile(r"<(p|div)[^>]*>(\s|&nbsp;|<br\s*/?>)*</\1>", re.IGNORECASE)
+WHITESPACE_BR_RE = re.compile(r'(?:<br\s*/?>\s*){2,}', re.IGNORECASE)
+EMPTY_BLOCK_RE = re.compile(r'<(p|div)[^>]*>(\s|&nbsp;|<br\s*/?>)*</\1>', re.IGNORECASE)
 
 
 def get(url, retries=3):
-    """GET with polite delay + retry on transient failures."""
+    """GET with polite delay + retry on transient failures. Also
+    respects/triggers the shared backoff: waits if another worker
+    recently got rate-limited, and if THIS request gets rate-limited,
+    tells every other worker to pause too."""
     last_exc = None
     for attempt in range(1, retries + 1):
+        _wait_for_backoff()
         try:
             time.sleep(1.5 + random.random())
             r = session.get(url, timeout=30)
+
+            if r.status_code in (429, 503):
+                retry_after = r.headers.get("Retry-After")
+                wait_s = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else 30
+                print(f"    ! server returned {r.status_code} for {url} "
+                      f"— pausing ALL workers for {wait_s:.0f}s")
+                _trigger_backoff(wait_s)
+                last_exc = requests.HTTPError(f"{r.status_code} rate-limited: {url}")
+                continue  # retry after the backoff clears, if attempts remain
+
             r.raise_for_status()
             return r.text
         except Exception as e:
@@ -62,6 +99,35 @@ def get(url, retries=3):
             if attempt < retries:
                 time.sleep(5 * attempt)
     raise last_exc
+
+
+def get_many(urls, max_workers=1):
+    """Fetch multiple URLs concurrently with a small worker pool.
+    Each worker still goes through get()'s own per-request delay AND
+    the shared backoff above — so raising max_workers increases
+    throughput, but a 429/503 from the server still pauses every
+    worker immediately rather than letting the rest keep hammering it.
+
+    Returns {url: html} for successes; failed URLs (retries exhausted)
+    are simply omitted from the result dict rather than raising, so
+    one bad page doesn't take down a whole batch.
+
+    Default is 1 (sequential, same as before this feature existed).
+    This is still new/unverified against this specific server's real
+    tolerance — if you raise it, start at 3, and watch the first batch
+    closely for repeated "pausing ALL workers" messages, which mean
+    even that is too aggressive.
+    """
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_to_url = {ex.submit(get, u): u for u in urls}
+        for future in as_completed(future_to_url):
+            u = future_to_url[future]
+            try:
+                results[u] = future.result()
+            except Exception as e:
+                print(f"    ! failed permanently: {u} ({e})")
+    return results
 
 
 def clean_post_html(body_el):
@@ -86,22 +152,14 @@ def local_filename(page: int) -> str:
 
 
 def build_nav(page: int, total: int) -> str:
-    prev_link = (
-        f'<a href="{local_filename(page - 1)}">&laquo; Prev</a>'
-        if page > 1
-        else "<span></span>"
-    )
-    next_link = (
-        f'<a href="{local_filename(page + 1)}">Next &raquo;</a>'
-        if page < total
-        else "<span></span>"
-    )
+    prev_link = f'<a href="{local_filename(page - 1)}">&laquo; Prev</a>' if page > 1 else "<span></span>"
+    next_link = f'<a href="{local_filename(page + 1)}">Next &raquo;</a>' if page < total else "<span></span>"
 
-    current = f"<span>Page {page} of {total}</span>"
+    current = f'<span>Page {page} of {total}</span>'
     if page > 1:  # "Index" is redundant on page 1 itself (you're already there)
         current += ' <a href="index.html">Index</a>'
 
-    return f"{next_link}{current}{prev_link}"
+    return f'{next_link}{current}{prev_link}'
 
 
 def build_page_list(total: int, max_links: int = 30) -> str:
@@ -117,12 +175,8 @@ def build_page_list(total: int, max_links: int = 30) -> str:
     if total <= max_links:
         items = ["1"] + [link(n) for n in range(2, total + 1)]
     else:
-        items = (
-            ["1"]
-            + [link(n) for n in range(2, 11)]
-            + ["&hellip;"]
-            + [link(n) for n in range(total - 9, total + 1)]
-        )
+        items = ["1"] + [link(n) for n in range(2, 11)] + ["&hellip;"] + \
+                [link(n) for n in range(total - 9, total + 1)]
 
     return f'<div class="pagelist" data-pagefind-ignore>Pages: {" ".join(items)}</div>'
 
@@ -138,24 +192,19 @@ def extract_page(html, source_url, page: int, total: int):
 
     posts_html = []
     for article in soup.select("article.message"):
-        author_el = article.select_one("a.username") or article.select_one(
-            ".message-name"
-        )
+        author_el = article.select_one("a.username") or article.select_one(".message-name")
         date_el = article.select_one("time.u-dt")
         body_el = article.select_one("div.bbWrapper")
         if not body_el:
             continue
         author = author_el.get_text(strip=True) if author_el else "?"
-        date = (date_el.get("title") if date_el else None) or (
-            date_el.get_text(strip=True) if date_el else "?"
-        )
+        date = (date_el.get("title") if date_el else None) or \
+               (date_el.get_text(strip=True) if date_el else "?")
         for junk in body_el.select("script, style"):
             junk.decompose()
-        posts_html.append(
-            POST_TEMPLATE.format(
-                author=author, date=date, content=clean_post_html(body_el)
-            )
-        )
+        posts_html.append(POST_TEMPLATE.format(
+            author=author, date=date, content=clean_post_html(body_el)
+        ))
 
     if not posts_html:
         return None, title, 0
@@ -163,13 +212,8 @@ def extract_page(html, source_url, page: int, total: int):
     nav = build_nav(page, total)
     page_list = build_page_list(total) if page == 1 else ""
     page_html = PAGE_TEMPLATE.format(
-        title=title,
-        page=page,
-        total=total,
-        posts="\n".join(posts_html),
-        source_url=source_url,
-        nav=nav,
-        page_list=page_list,
+        title=title, page=page, total=total, posts="\n".join(posts_html),
+        source_url=source_url, nav=nav, page_list=page_list,
     )
     return page_html, title, len(posts_html)
 
@@ -183,8 +227,8 @@ def safe_dirname(title: str, thread_id: str, max_bytes: int = 100) -> str:
     Appends the thread_id so titles that collide/truncate to the same
     thing still get distinct folders.
     """
-    cleaned = re.sub(r'[\\/:*?"<>|]+', "", title).strip()
-    cleaned = re.sub(r"\s+", "_", cleaned)
+    cleaned = re.sub(r'[\\/:*?"<>|]+', '', title).strip()
+    cleaned = re.sub(r'\s+', '_', cleaned)
     if not cleaned:
         cleaned = "thread"
 

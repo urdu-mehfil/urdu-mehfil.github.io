@@ -108,6 +108,10 @@ Good way to decide which category to prioritize finishing next.
 python3 2_extract_category.py --category "بزم سخن"
 # or:
 python3 2_extract_category.py --category-id 59
+
+# normally default to 1 dont use more than 5
+python3 2_extract_category.py --max-workers 3 --category-id 59
+
 ```
 
 Reads the matching rows from `topics.csv`, fetches **every page** of
