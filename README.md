@@ -1,6 +1,34 @@
 # Archiving urduweb.org/mehfil (XenForo forum)
 
-Confirmed URL structure (checked against a live thread page):
+## Dependencies
+
+- python
+
+## Python dependencies
+
+More detail in requirements.txt. it is best to use virtualenv and pip to handle these. you need to install the following:
+
+- beautifulsoup4
+- lxml
+- pagefind
+- requests
+
+
+## Testing Installation
+
+1. Run `python -m venv env`.
+
+        cd /path/to/urdu-mehfil && python -m venv ./venv/
+
+2. Activate the virtualenv.
+
+        source ./venv/bin/activate
+
+3. Install dependencies through `pip`.
+
+        pip install -r requirements.txt
+
+## Confirmed URL structure (checked against a live thread page):
 
 ```
 Category:        /mehfil/forums/<slug>.<id>/
@@ -17,19 +45,9 @@ guessing or fetching pages until one 404s.
 Three scripts, run locally (Claude's sandbox can't reach urduweb.org).
 All are polite/rate-limited by default — please don't remove the delays.
 
-## Before you start
-
-- Check `https://www.urduweb.org/mehfil/robots.txt` and the forum's terms
-  of service.
-- The forum is large (~2M+ posts, 100K+ threads). Getting every page's
-  count means one extra request per thread — for the whole site that's
-  a lot of requests. The workflow below is built around doing that in
-  resumable chunks rather than one long run.
-
 ## Step 1 — fast discovery (`1_discover.py`)
 
 ```bash
-pip install requests beautifulsoup4 lxml
 python3 1_discover.py --no-page-counts
 ```
 
@@ -38,7 +56,11 @@ thread: category, id, title, slug, page-1 url) with `total_pages` left
 blank for now. This is the cheap pass — just listing pages, no
 per-thread requests — so it's fine to run for the whole site.
 
-## Step 2 — backfill page counts, resumable (`1_discover.py --fill-page-counts`)
+## Step 2 — backfill page counts, resumable
+
+```bash
+python 1_discover.py --fill-page-counts
+```
 
 This is the part that was taking a while, now split out and resumable.
 It reads `topics.csv`, visits each thread once to read its real page
@@ -80,7 +102,7 @@ making any requests, e.g.:
 
 Good way to decide which category to prioritize finishing next.
 
-## Step 3 — extract a category (`2_extract_category.py`)
+## Step 3 — extract a category
 
 ```bash
 python3 2_extract_category.py --category "بزم سخن"
@@ -99,7 +121,7 @@ archive/<category>/<thread-slug>/page-2.html
 ...
 ```
 
-## Step 4 (optional) — back it up on the Wayback Machine (`3_wayback_submit.py`)
+## Step 4 (optional) — back it up on the Wayback Machine
 
 ```bash
 pip install savepagenow
