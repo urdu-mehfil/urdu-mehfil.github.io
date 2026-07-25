@@ -78,6 +78,8 @@ python3 1_discover.py --fill-page-counts topics.csv
 # or work through it one category at a time
 python3 1_discover.py --fill-page-counts topics.csv --category-id 59
 
+python3 1_discover.py --max-worker 3 --fill-page-counts topics.csv --category-id 59
+
 # fix/backfill just one thread
 python3 1_discover.py --fill-page-counts topics.csv --thread-id 2080
 ```
