@@ -16,6 +16,11 @@ Two modes:
      and re-run the same command, it picks up where it left off —
      rows that already have total_pages are simply skipped.
 
+Both modes' per-thread page-count lookups now go through
+extract_common.get_many() — the same bounded-concurrency + shared
+429/503 backoff used by 2_extract_category.py. Default is still
+sequential (--max-workers 1) so nothing changes unless you opt in.
+
 URL structure (confirmed against a live thread page):
     Category:        /mehfil/forums/<slug>.<id>/
     Thread, page 1:  /mehfil/threads/<slug>.<id>/
@@ -29,15 +34,16 @@ USAGE:
     # normal discovery
     python3 1_discover.py
     python3 1_discover.py --no-page-counts
+    python3 1_discover.py --max-workers 3        # faster page-count lookups
 
     # check where you stand, no network calls
     python3 1_discover.py --fill-page-counts topics.csv --progress
 
     # backfill everything still missing
-    python3 1_discover.py --fill-page-counts topics.csv
+    python3 1_discover.py --fill-page-counts topics.csv --max-workers 3
 
     # backfill just one category (see categories.csv for ids)
-    python3 1_discover.py --fill-page-counts topics.csv --category-id 59
+    python3 1_discover.py --fill-page-counts topics.csv --category-id 59 --max-workers 3
 
     # backfill/fix a single thread
     python3 1_discover.py --fill-page-counts topics.csv --thread-id 2080
@@ -46,18 +52,15 @@ USAGE:
 import csv
 import os
 import re
-import sys
-import time
-import random
 import argparse
 from collections import defaultdict
 from urllib.parse import urljoin
 
-import requests
 from bs4 import BeautifulSoup
 
+from extract_common import get, get_many
+
 BASE = "https://www.urduweb.org/mehfil/"
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; personal-archive/1.0; contact: YOUR-EMAIL-HERE)"}
 
 FORUM_RE = re.compile(r"/mehfil/forums/([^/\"]+)\.(\d+)/?$")
 THREAD_RE = re.compile(r"/mehfil/threads/([^/\"]+)\.(\d+)/")
@@ -67,40 +70,13 @@ OF_TOTAL_RE = re.compile(r"(\d+)\s*از\s*(\d+)")  # Urdu "X of Y"
 TOPICS_FIELDS = ["category_id", "category_name", "thread_id", "thread_title",
                   "thread_slug", "url", "total_pages"]
 
-session = requests.Session()
-session.headers.update(HEADERS)
-
-
-def get(url, retries=3):
-    """GET with polite delay + automatic retry on transient failures
-    (timeouts, connection resets, 5xx, etc). Raises the last error if
-    all retries are exhausted, so callers can still decide to skip."""
-    last_exc = None
-    for attempt in range(1, retries + 1):
-        try:
-            time.sleep(1.5 + random.random())
-            r = session.get(url, timeout=30)
-            r.raise_for_status()
-            return r.text
-        except Exception as e:
-            last_exc = e
-            if attempt < retries:
-                wait = 5 * attempt
-                print(f"    ! request failed ({e}) — retry {attempt}/{retries} in {wait}s")
-                time.sleep(wait)
-    raise last_exc
-
 
 def canonical_thread_url(slug: str, tid: str) -> str:
     return urljoin(BASE, f"threads/{slug}.{tid}/")
 
 
-def get_total_pages(thread_url: str) -> int:
-    """Fetch a thread's page 1 and read off its total page count."""
-    try:
-        html = get(thread_url)
-    except requests.HTTPError:
-        return 1
+def parse_total_pages(html: str) -> int:
+    """Read a thread's total page count off its own page-1 pagination nav."""
     soup = BeautifulSoup(html, "lxml")
 
     last_link = soup.find("a", title="Last")
@@ -114,6 +90,28 @@ def get_total_pages(thread_url: str) -> int:
         return int(m.group(2))
 
     return 1  # no pagination nav -> single-page thread
+
+
+def get_total_pages(thread_url: str) -> int:
+    """Single-URL convenience wrapper. Batch callers (fill_page_counts,
+    run_discovery) use get_many + parse_total_pages directly instead —
+    see fill_page_counts_batch() below."""
+    try:
+        html = get(thread_url)
+    except Exception:
+        return 1
+    return parse_total_pages(html)
+
+
+def fill_page_counts_batch(rows_needing_counts, max_workers=1):
+    """Fetch page counts for a list of topic rows concurrently (bounded
+    by max_workers, sharing the same 429/503 backoff as everything
+    else) and set total_pages on each row in place."""
+    urls = [r["url"] for r in rows_needing_counts]
+    html_by_url = get_many(urls, max_workers=max_workers)
+    for r in rows_needing_counts:
+        html = html_by_url.get(r["url"])
+        r["total_pages"] = str(parse_total_pages(html)) if html else ""
 
 
 # ---------------------------------------------------------------- discovery
@@ -156,6 +154,10 @@ def discover_categories():
 
 
 def discover_topics_for_category(cat, max_pages=None):
+    # Listing-page pagination stays sequential — each page's URL is only
+    # known after checking whether the previous one had any threads on
+    # it, so there's no independent batch of URLs to fetch concurrently
+    # here (unlike per-thread page counts below).
     topics = {}
     page = 1
     url = cat["url"]
@@ -163,7 +165,7 @@ def discover_topics_for_category(cat, max_pages=None):
         page_url = url if page == 1 else urljoin(url, f"page-{page}")
         try:
             html = get(page_url)
-        except requests.HTTPError:
+        except Exception:
             break
         soup = BeautifulSoup(html, "lxml")
         found_this_page = 0
@@ -191,7 +193,7 @@ def discover_topics_for_category(cat, max_pages=None):
     return list(topics.values())
 
 
-def run_discovery(max_pages_per_category, no_page_counts, topics_path="topics.csv"):
+def run_discovery(max_pages_per_category, no_page_counts, max_workers=1, topics_path="topics.csv"):
     print("Discovering categories...")
     categories = discover_categories()
 
@@ -251,14 +253,7 @@ def run_discovery(max_pages_per_category, no_page_counts, topics_path="topics.cs
         print(f"  -> {len(topics)} threads")
 
         if not no_page_counts:
-            for i, t in enumerate(topics, 1):
-                try:
-                    t["total_pages"] = get_total_pages(t["url"])
-                except Exception as e:
-                    print(f"    ! couldn't get page count for thread {t['thread_id']} ({e}) — leaving blank")
-                    t["total_pages"] = ""
-                if i % 25 == 0:
-                    print(f"    ...page counts: {i}/{len(topics)}")
+            fill_page_counts_batch(topics, max_workers=max_workers)
         else:
             for t in topics:
                 t["total_pages"] = ""
@@ -316,7 +311,8 @@ def print_progress_report(rows):
           f"  ({grand_done/grand_total*100:.1f}%)" if grand_total else "No rows found.")
 
 
-def fill_page_counts(csv_path, category_id=None, thread_id=None, save_every=20, progress_only=False):
+def fill_page_counts(csv_path, category_id=None, thread_id=None, save_every=20,
+                      progress_only=False, max_workers=1):
     rows, fieldnames = read_topics_csv(csv_path)
 
     if progress_only:
@@ -337,17 +333,18 @@ def fill_page_counts(csv_path, category_id=None, thread_id=None, save_every=20, 
               "Use --progress to see the full breakdown.")
         return
 
-    print(f"{len(targets)} row(s) need total_pages. Filling in, saving every {save_every}...")
+    print(f"{len(targets)} row(s) need total_pages. Fetching with max {max_workers} "
+          f"concurrent request(s), saving every {save_every}...")
     print("(Ctrl+C any time — progress made so far is saved before exit.)")
 
     processed = 0
     try:
-        for row in targets:
-            row["total_pages"] = str(get_total_pages(row["url"]))
-            processed += 1
-            if processed % save_every == 0:
-                write_topics_csv_atomic(csv_path, rows, fieldnames)
-                print(f"  ...{processed}/{len(targets)} done, saved.")
+        for batch_start in range(0, len(targets), save_every):
+            batch = targets[batch_start:batch_start + save_every]
+            fill_page_counts_batch(batch, max_workers=max_workers)
+            processed += len(batch)
+            write_topics_csv_atomic(csv_path, rows, fieldnames)
+            print(f"  ...{processed}/{len(targets)} done, saved.")
     except KeyboardInterrupt:
         print("\nInterrupted — saving progress...")
     finally:
@@ -373,6 +370,13 @@ def main():
     ap.add_argument("--progress", action="store_true",
                      help="[fill mode] Just report done/remaining per category, no network calls")
 
+    ap.add_argument("--max-workers", type=int, default=1,
+                     help="Concurrent requests for page-count lookups, in both discovery mode "
+                          "(unless --no-page-counts) and fill mode (default 1 = same sequential "
+                          "behavior as before). This forum has rate-limited/blocked before — "
+                          "raise it deliberately (try 3, matching what's working in "
+                          "2_extract_category.py) and watch for '! server returned 429/503'.")
+
     args = ap.parse_args()
 
     if args.fill_page_counts:
@@ -382,9 +386,10 @@ def main():
             thread_id=args.thread_id,
             save_every=args.save_every,
             progress_only=args.progress,
+            max_workers=args.max_workers,
         )
     else:
-        run_discovery(args.max_pages_per_category, args.no_page_counts)
+        run_discovery(args.max_pages_per_category, args.no_page_counts, max_workers=args.max_workers)
 
 
 if __name__ == "__main__":
