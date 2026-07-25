@@ -178,7 +178,7 @@ def build_page_list(total: int, max_links: int = 30) -> str:
         items = ["1"] + [link(n) for n in range(2, 11)] + ["&hellip;"] + \
                 [link(n) for n in range(total - 9, total + 1)]
 
-    return f'<div class="pagelist" data-pagefind-ignore>Pages: {" ".join(items)}</div>'
+    return f'<div class="pagelist" data-pagefind-ignore>صفحات: {" ".join(items)}</div>'
 
 
 def extract_page(html, source_url, page: int, total: int):
