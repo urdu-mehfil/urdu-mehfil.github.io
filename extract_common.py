@@ -157,7 +157,7 @@ def build_nav(page: int, total: int) -> str:
 
     current = f'<span>صفحہ {page} از {total}</span>'
     if page > 1:  # "Index" is redundant on page 1 itself (you're already there)
-        current += ' <a href="index.html">Index</a>'
+        current += ' <a href="index.html">پہلا صفحہ</a>'
 
     return f'{next_link}{current}{prev_link}'
 
