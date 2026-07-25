@@ -152,10 +152,10 @@ def local_filename(page: int) -> str:
 
 
 def build_nav(page: int, total: int) -> str:
-    prev_link = f'<a href="{local_filename(page - 1)}">&laquo; Prev</a>' if page > 1 else "<span></span>"
-    next_link = f'<a href="{local_filename(page + 1)}">Next &raquo;</a>' if page < total else "<span></span>"
+    prev_link = f'<a href="{local_filename(page - 1)}">&laquo; پچھلا صفحہ</a>' if page > 1 else "<span></span>"
+    next_link = f'<a href="{local_filename(page + 1)}">اگلا صفحہ &raquo;</a>' if page < total else "<span></span>"
 
-    current = f'<span>Page {page} of {total}</span>'
+    current = f'<span>صفحہ {page} از {total}</span>'
     if page > 1:  # "Index" is redundant on page 1 itself (you're already there)
         current += ' <a href="index.html">Index</a>'
 
