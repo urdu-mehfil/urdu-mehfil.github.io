@@ -15,7 +15,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; personal-archive/1.0; contact: YOUR-EMAIL-HERE)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; Urdu-Mehfil-Archive-Bot/2.0 (Python 3.10+)"}
 session = requests.Session()
 session.headers.update(HEADERS)
 
