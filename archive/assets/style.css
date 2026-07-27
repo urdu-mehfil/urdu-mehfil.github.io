@@ -65,6 +65,12 @@ h1 {
   margin-top: 2em;
 }
 
+.source a {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  /* fallback */
+}
+
 .pagenav {
   display: flex;
   justify-content: space-between;
