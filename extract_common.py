@@ -15,7 +15,9 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; Urdu-Mehfil-Archive-Bot/2.0 (Python 3.10+)"}
+from copy import deepcopy
+
+HEADERS = {"User-Agent": "compatible; Urdu-Mehfil-Archive-Bot/2.0 (Python 3.10+)"}
 session = requests.Session()
 session.headers.update(HEADERS)
 
@@ -42,6 +44,7 @@ def _trigger_backoff(seconds):
     with _backoff_lock:
         _backoff_until = max(_backoff_until, time.time() + seconds)
 
+
 PAGE_TEMPLATE = """<!DOCTYPE html>
 <html lang="ur" dir="rtl">
 <head>
@@ -67,8 +70,8 @@ POST_TEMPLATE = """<div class="post">
 </div>
 """
 
-WHITESPACE_BR_RE = re.compile(r'(?:<br\s*/?>\s*){2,}', re.IGNORECASE)
-EMPTY_BLOCK_RE = re.compile(r'<(p|div)[^>]*>(\s|&nbsp;|<br\s*/?>)*</\1>', re.IGNORECASE)
+WHITESPACE_BR_RE = re.compile(r"(?:<br\s*/?>\s*){2,}", re.IGNORECASE)
+EMPTY_BLOCK_RE = re.compile(r"<(p|div)[^>]*>(\s|&nbsp;|<br\s*/?>)*</\1>", re.IGNORECASE)
 
 
 def get(url, retries=3):
@@ -85,9 +88,15 @@ def get(url, retries=3):
 
             if r.status_code in (429, 503):
                 retry_after = r.headers.get("Retry-After")
-                wait_s = float(retry_after) if retry_after and retry_after.replace(".", "", 1).isdigit() else 30
-                print(f"    ! server returned {r.status_code} for {url} "
-                      f"— pausing ALL workers for {wait_s:.0f}s")
+                wait_s = (
+                    float(retry_after)
+                    if retry_after and retry_after.replace(".", "", 1).isdigit()
+                    else 30
+                )
+                print(
+                    f"    ! server returned {r.status_code} for {url} "
+                    f"— pausing ALL workers for {wait_s:.0f}s"
+                )
                 _trigger_backoff(wait_s)
                 last_exc = requests.HTTPError(f"{r.status_code} rate-limited: {url}")
                 continue  # retry after the backoff clears, if attempts remain
@@ -152,14 +161,22 @@ def local_filename(page: int) -> str:
 
 
 def build_nav(page: int, total: int) -> str:
-    prev_link = f'<a href="{local_filename(page - 1)}">&laquo; پچھلا صفحہ</a>' if page > 1 else "<span></span>"
-    next_link = f'<a href="{local_filename(page + 1)}">اگلا صفحہ &raquo;</a>' if page < total else "<span></span>"
+    prev_link = (
+        f'<a href="{local_filename(page - 1)}">&laquo; پچھلا صفحہ</a>'
+        if page > 1
+        else "<span></span>"
+    )
+    next_link = (
+        f'<a href="{local_filename(page + 1)}">اگلا صفحہ &raquo;</a>'
+        if page < total
+        else "<span></span>"
+    )
 
-    current = f'<span>صفحہ {page} از {total}</span>'
+    current = f"<span>صفحہ {page} از {total}</span>"
     if page > 1:  # "Index" is redundant on page 1 itself (you're already there)
         current += ' <a href="index.html">پہلا صفحہ</a>'
 
-    return f'{next_link}{current}{prev_link}'
+    return f"{next_link}{current}{prev_link}"
 
 
 def build_page_list(total: int, max_links: int = 30) -> str:
@@ -175,8 +192,12 @@ def build_page_list(total: int, max_links: int = 30) -> str:
     if total <= max_links:
         items = ["1"] + [link(n) for n in range(2, total + 1)]
     else:
-        items = ["1"] + [link(n) for n in range(2, 11)] + ["&hellip;"] + \
-                [link(n) for n in range(total - 9, total + 1)]
+        items = (
+            ["1"]
+            + [link(n) for n in range(2, 11)]
+            + ["&hellip;"]
+            + [link(n) for n in range(total - 9, total + 1)]
+        )
 
     return f'<div class="pagelist" data-pagefind-ignore>صفحات: {" ".join(items)}</div>'
 
@@ -187,24 +208,38 @@ def extract_page(html, source_url, page: int, total: int):
     is assumed. If this forum's theme customizes class names, adjust
     the selectors below."""
     soup = BeautifulSoup(html, "lxml")
+    # title_el = soup.select_one("h1.p-title-value")
+    # title = title_el.get_text(strip=True) if title_el else "Untitled thread"
     title_el = soup.select_one("h1.p-title-value")
-    title = title_el.get_text(strip=True) if title_el else "Untitled thread"
+
+    if title_el:
+        title_el = deepcopy(title_el)
+        for span in title_el.select(".label, .label-append"):
+            span.decompose()
+        title = title_el.get_text(" ", strip=True)
+    else:
+        title = "Untitled thread"
 
     posts_html = []
     for article in soup.select("article.message"):
-        author_el = article.select_one("a.username") or article.select_one(".message-name")
+        author_el = article.select_one("a.username") or article.select_one(
+            ".message-name"
+        )
         date_el = article.select_one("time.u-dt")
         body_el = article.select_one("div.bbWrapper")
         if not body_el:
             continue
         author = author_el.get_text(strip=True) if author_el else "?"
-        date = (date_el.get("title") if date_el else None) or \
-               (date_el.get_text(strip=True) if date_el else "?")
+        date = (date_el.get("title") if date_el else None) or (
+            date_el.get_text(strip=True) if date_el else "?"
+        )
         for junk in body_el.select("script, style"):
             junk.decompose()
-        posts_html.append(POST_TEMPLATE.format(
-            author=author, date=date, content=clean_post_html(body_el)
-        ))
+        posts_html.append(
+            POST_TEMPLATE.format(
+                author=author, date=date, content=clean_post_html(body_el)
+            )
+        )
 
     if not posts_html:
         return None, title, 0
@@ -212,8 +247,13 @@ def extract_page(html, source_url, page: int, total: int):
     nav = build_nav(page, total)
     page_list = build_page_list(total) if page == 1 else ""
     page_html = PAGE_TEMPLATE.format(
-        title=title, page=page, total=total, posts="\n".join(posts_html),
-        source_url=source_url, nav=nav, page_list=page_list,
+        title=title,
+        page=page,
+        total=total,
+        posts="\n".join(posts_html),
+        source_url=source_url,
+        nav=nav,
+        page_list=page_list,
     )
     return page_html, title, len(posts_html)
 
@@ -227,8 +267,8 @@ def safe_dirname(title: str, thread_id: str, max_bytes: int = 100) -> str:
     Appends the thread_id so titles that collide/truncate to the same
     thing still get distinct folders.
     """
-    cleaned = re.sub(r'[\\/:*?"<>|]+', '', title).strip()
-    cleaned = re.sub(r'\s+', '_', cleaned)
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "", title).strip()
+    cleaned = re.sub(r"\s+", "_", cleaned)
     if not cleaned:
         cleaned = "thread"
 
