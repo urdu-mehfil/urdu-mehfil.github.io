@@ -33,11 +33,11 @@ CATEGORY_INDEX_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body data-pagefind-ignore>
 <h1>{category_name}</h1>
-<p class="meta">{count} thread(s) archived so far</p>
+<p class="meta">ابھی تک {count} موضوع محفوظ ہوئے ہیں</p>
 <ul>
 {links}
 </ul>
-<p><a href="../index.html">&laquo; All categories</a></p>
+<p><a href="../index.html">تمام زمرے دیکھیں &raquo;</a></p>
 </body>
 </html>
 """
@@ -47,15 +47,15 @@ CATEGORIES_INDEX_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>All categories</title>
+<title>تمام زمرہ جات</title>
 <link rel="stylesheet" href="../assets/style.css">
 </head>
 <body data-pagefind-ignore>
-<h1>Categories</h1>
+<h1>زمرہ جات</h1>
 <ul>
 {links}
 </ul>
-<p><a href="../index.html">&laquo; Home</a></p>
+<p><a href="../index.html">واپس &raquo;</a></p>
 </body>
 </html>
 """
@@ -101,7 +101,7 @@ def rebuild_categories_index(db_path, out_root: Path):
 
     entries.sort(key=lambda e: e[1])
     links = "\n".join(
-        f'  <li><a href="{d}/index.html">{n}</a> ({c} thread{"s" if c != 1 else ""})</li>'
+        f'  <li><a href="{d}/index.html">{n}</a> ({c} موضوع{"ات" if c != 1 else ""})</li>'
         for d, n, c in entries
     )
 
